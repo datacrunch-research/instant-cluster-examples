@@ -1,0 +1,75 @@
+name: torchtitan-tutorial
+
+num_nodes: 2
+
+resources:
+  infra: k8s
+  accelerators: B300:8           # adjust for your GPU SKU
+  image_id: docker:nvcr.io/nvidia/pytorch:25.08-py3
+  cpus: 32+
+  memory: 192+
+
+# Route the job through Kueue's LocalQueue and inject RDMA + IPC_LOCK.
+# SkyPilot's short form covers CPU/memory/GPU but not custom cluster
+# resources, so we pass RDMA as a raw pod spec fragment.
+config:
+  kubernetes:
+    kueue:
+      local_queue_name: my-local-queue
+    pod_config:
+      spec:
+        containers:
+          - resources:
+              limits:
+                rdma/rdma_shared_device_a: "1"
+              requests:
+                rdma/rdma_shared_device_a: "1"
+            securityContext:
+              capabilities:
+                add: ["IPC_LOCK"]
+
+envs:
+  NCCL_DEBUG: INFO
+  NCCL_SOCKET_IFNAME: eth0
+  NCCL_IB_TIMEOUT: "22"
+  NCCL_IB_RETRY_CNT: "7"
+  NCCL_NET_GDR_LEVEL: "0"
+
+setup: |
+  set -ex
+  cd ~
+  if [ ! -d torchtitan ]; then
+    git clone https://github.com/pytorch/torchtitan.git
+  fi
+  cd torchtitan
+  # Pin to a commit whose torch API usage matches NGC 25.08's torch build.
+  # Newer torchtitan commits import APIs (HuggingFaceStorageWriter,
+  # DefaultStager) that are still private in this torch build.
+  git checkout b0902b29
+  # Install torchtitan's deps, minus torch* (NGC image already provides it).
+  grep -E -v '^(torch|torchvision|torchaudio)([[:space:]]|$|[<>=])' \
+    requirements.txt > /tmp/req-notorch.txt
+  pip install --no-cache-dir -r /tmp/req-notorch.txt
+  pip install --no-cache-dir tiktoken blobfile pyyaml
+  pip install --no-cache-dir --no-deps -e .
+  python -c "import torchtitan, torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+
+run: |
+  set -ex
+  cd ~/torchtitan
+  MASTER_ADDR=$(echo $SKYPILOT_NODE_IPS | awk '{print $1}')
+  MASTER_PORT=29500
+  echo "rank=$SKYPILOT_NODE_RANK nnodes=$SKYPILOT_NUM_NODES gpus/node=$SKYPILOT_NUM_GPUS_PER_NODE master=$MASTER_ADDR"
+
+  CONFIG=./torchtitan/models/llama3/train_configs/debug_model.toml
+
+  torchrun \
+    --nproc-per-node=$SKYPILOT_NUM_GPUS_PER_NODE \
+    --nnodes=$SKYPILOT_NUM_NODES \
+    --node-rank=$SKYPILOT_NODE_RANK \
+    --rdzv-id=100 \
+    --rdzv-backend=c10d \
+    --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT \
+    -m torchtitan.train \
+    --job.config-file "$CONFIG" \
+    --training.steps=50

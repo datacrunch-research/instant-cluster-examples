@@ -1,0 +1,14 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-quickstart
+  namespace: dynamo-system
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: auto                                           # vllm | sglang | trtllm | auto
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0"
+  hardware:
+    gpuSku: b200_sxm                                      # see Known issues for B300 mapping
+    vramMb: 275039                                        # actual per-GPU VRAM in MiB (B300 SXM6)
+    totalGpus: 8                                          # match your allocatable GPU count
+    numGpusPerNode: 8                                     # GPUs per node
